@@ -35,6 +35,7 @@ jobs:
             --max-retries 3
             --retry-wait-time 5
             --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            --root .
             "**/*.md"
         env:
           # By passing the GITHUB_TOKEN, Lychee uses the official GitHub API to check
