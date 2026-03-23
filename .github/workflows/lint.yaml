@@ -29,6 +29,11 @@ jobs:
       - name: Update pip
         run: python -m pip install --upgrade pip
 
+      - name: Install lint utilities
+        run: |
+          pip install pre-commit
+          pre-commit install-hooks
+
       - name: Install Lychee (Latest Release)
         run: |
           # Query GitHub API for the latest release tag
