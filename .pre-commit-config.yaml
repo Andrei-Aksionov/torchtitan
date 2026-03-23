@@ -96,7 +96,6 @@ repos:
       args:
         - "--offline"
         - "--no-progress"
-        - "--exclude=file://.*"
         - "--exclude-path=/\\.[^/]+/"
         - "--root-dir=."
         - "."
@@ -128,7 +127,6 @@ repos:
         - "--verbose"
         - "--no-progress"
         - "--exclude-path=/\\.[^/]+/"
-        - "--exclude=file://.*"
         - "--root-dir=."
         - "--accept=200,403,429,503"
         - "--exclude=http://localhost:.*"
