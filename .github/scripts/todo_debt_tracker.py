@@ -295,29 +295,6 @@ def get_human_readable_time(iso_date_str: str) -> str:
         return f"{diff.days} days ago"
 
 
-def stealth_link(url: str, text: str) -> str:
-    """
-    Constructs an HTML anchor tag designed to bypass GitHub's automated cross-reference parser.
-
-    Uses zero-width spaces in the visible text and HTML entities for dots in the href attribute
-    to prevent the 'Mentioned in...' notification on the target Issue or Pull Request.
-
-    Args:
-        url: The actual destination URL.
-        text: The visible label for the link.
-
-    Returns:
-        A string containing the obfuscated HTML <a> tag.
-    """
-
-    # Use HTML entities for the dots in the URL to obscure it from simple regex bots
-    stealth_url = url.replace(".", "&#46;")
-    # Put the zero-width space in the visible text only
-    stealth_text = text.replace("github.com", "github&#8203;.com")
-
-    return f'<a href="{stealth_url}">{stealth_text}</a>'
-
-
 def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
     """
     Constructs a formatted Markdown report with emojis and layout fixes.
@@ -377,9 +354,6 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
 
                 # 2. Comment text of the todo
                 description = item["comment_text"]
-                # Obfuscate URLs in the description (so the target PR/Issue doesn't add the report as mentioned)
-                for url in re.findall(r"(https?://[^\s]+)", description):
-                    description = description.replace(url, stealth_link(url, url))
 
                 # 3. Timestamp of the PR/Issue
                 timestamp = (
