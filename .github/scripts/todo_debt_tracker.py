@@ -293,8 +293,9 @@ def main() -> None:
     if summary_path:
         with open(summary_path, "a") as f:
             f.write(report)
-    else:
-        print(report)
+
+    # Print to stdout for the "gh issue edit" command
+    print(report)
 
 
 if __name__ == "__main__":
