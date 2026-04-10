@@ -292,7 +292,8 @@ def get_human_readable_time(iso_date_str: str) -> str:
     elif diff.days == 1:
         return "yesterday"
     else:
-        return f"{diff.days} days ago"
+        # Use non-breaking spaces to prevent vertical stacking in tables
+        return f"{diff.days}&nbsp;days&nbsp;ago"
 
 
 def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
