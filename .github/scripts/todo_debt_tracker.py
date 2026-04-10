@@ -317,7 +317,7 @@ def generate_markdown_report(all_items: list[dict[str, str]]) -> str:
     )
     # Table's header notation
     output += (
-        "*Author*: Who author the comment</br>"
+        "*Author*: The author the comment</br>"
         "*Content*: The body of the comment</br>"
         "*When*: When the linked PR/Issue was Merged, Closed or Opened</br>"
         "*File Location*: The placement of the comment</br>\n\n"
