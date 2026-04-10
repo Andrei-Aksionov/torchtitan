@@ -45,7 +45,7 @@ jobs:
       - name: Update the Issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ISSUE_NUMBER: 42
+          ISSUE_NUMBER: 7
         run: |
           set -e
 
