@@ -60,6 +60,26 @@ class AsyncMode(str, enum.Enum):
 
 
 class ModelWrapper(Stateful):
+    """
+    A wrapper for `nn.Module` (or a list of modules) that caches the combined
+    `state_dict` to reduce overhead during distributed checkpointing.
+
+    In FSDP2, generating a state_dict can be computationally expensive because it
+    requires traversing the module hierarchy and computing sharding metadata for
+    distributed parameters (e.g., DTensors).
+
+    By caching the state_dict object, this class:
+        1. Minimizes repeated CPU work during the checkpoint "planning" phase.
+        2. Reuses a consistent state_dict object across calls, which can help
+        downstream checkpointing utilities (e.g., `dcp.save`) reuse internal plans.
+
+    Notes:
+        - Calling `load_state_dict` updates the underlying modules and
+        refreshes the cached state_dict.
+        - If the wrapped modules are modified outside this wrapper,
+        the cached state_dict may become stale.
+    """
+
     def __init__(self, model: nn.Module | list[nn.Module]) -> None:
         self.model = [model] if isinstance(model, nn.Module) else model
         self.cache_state_dict = self._get_state_dict()
