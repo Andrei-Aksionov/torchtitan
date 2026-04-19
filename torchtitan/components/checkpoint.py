@@ -16,7 +16,7 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, cast, Literal
+from typing import Any, cast, get_args, Literal
 
 import torch
 import torch.distributed as dist
@@ -323,6 +323,65 @@ class CheckpointManager(Configurable):
         to validate model correctness. Enabling this option allows checkpoints to be loaded
         without saving any during the training.
         """
+
+        def __post_init__(self):
+            # 1. Sanity & Range Checks
+            if not self.folder.strip():
+                raise ValueError("The 'folder' field cannot be empty.")
+            if self.interval < 1:
+                raise ValueError("Checkpoint interval needs to be at least 1 step.")
+            if self.keep_latest_k < 0:
+                raise ValueError("keep_latest_k cannot be negative.")
+            if self.keep_latest_k == 1:
+                raise ValueError("keep_latest_k cannot be 1; maintain at least 2 replicas.")
+
+            # 2. Path Normalization & Warning
+            if self.initial_load_path:
+                self.initial_load_path = self.initial_load_path.strip()
+                if not self.initial_load_path.startswith("/"):
+                    raise ValueError(
+                        f"initial_load_path must be absolute: {self.initial_load_path}"
+                    )
+                if not re.search(r"step[-_]\d+/?$", self.initial_load_path):
+                    logger.warning(
+                        f"initial_load_path '{self.initial_load_path}' missing step suffix (e.g. step-100)."
+                    )
+
+            # 3. Dependency Assertions (Field B requires Field A)
+            if self.initial_load_in_hf and not (
+                self.initial_load_path and self.initial_load_model_only
+            ):
+                raise ValueError(
+                    "initial_load_in_hf requires both initial_load_path and initial_load_model_only."
+                )
+
+            if self.initial_load_in_hf_quantized and not (
+                self.initial_load_in_hf and self.initial_load_path
+            ):
+                raise ValueError(
+                    "initial_load_in_hf_quantized requires initial_load_in_hf and initial_load_path."
+                )
+
+            if self.last_save_in_hf and not self.last_save_model_only:
+                raise ValueError("last_save_in_hf requires last_save_model_only=True.")
+
+            # 4. Mode Normalization
+            async_lowered = self.async_mode.lower()
+            if async_lowered in ("disabled", "async", "async_with_pinned_mem"):
+                self.async_mode = async_lowered
+            else:
+                raise ValueError(f"Invalid async_mode: {async_lowered}")
+
+            # 5. Redundancy Warnings
+            if self.load_only and self.enable_first_step_checkpoint:
+                logger.warning(
+                    "checkpoint.load_only is True; enable_first_step_checkpoint will be ignored."
+                )
+
+            if self.initial_load_model_only and not self.initial_load_path:
+                logger.warning(
+                    "initial_load_model_only=True has no effect without an initial_load_path."
+                )
 
     def __init__(
         self,
