@@ -270,15 +270,22 @@ class CheckpointManager(Configurable):
         """
         Which async checkpoint mode to use. Currently there are 3 different modes.
 
-        - "disabled": synchronized checkpointing will be used.
-        - "async": torch.distributed.checkpoint.async_save will be used.
-        - "async_with_pinned_mem": this option utilizes a dedicated pinned memory space and creates a
-          separate process for faster GPU->CPU transfer performance and eliminating GIL contention.
-          The cost is increased CPU memory usage. If insufficient CPU memory is available, performance
-          may degrade due to memory paging. For most users, "async" should suffice as the performance
-          overhead is typically small (on the order of tens of seconds) compared to checkpointing
-          frequency. This mode can be employed to pursue near-zero checkpointing times
-          (e.g., < 1 second) given appropriate hardware support such as ample CPU memory and fast PCIe.
+        - "disabled": Synchronized checkpointing. The training loop is blocked until all
+        data is successfully persisted to the persistence storage device (disk).
+
+        - "async": Uses threading and `torch.distributed.checkpoint.async_save`.
+        The training loop is blocked only during the GPU-to-CPU memory transfer (typically on the order of tens of seconds).
+        Once data reaches host RAM, training resumes while a background thread manages the final write to disk.
+        This reduces idle time but remains subject to GIL contention.
+
+        - "async_with_pinned_mem": Uses a separate process and pre-allocated pinned shared memory.
+        The training loop resumes almost immediately by overlapping the GPU-to-CPU DMA transfer
+        with the next iteration's computation.
+        The process then persists the data from pinned shared memory to disk.
+        This eliminates GIL contention and minimizes the blocking window to near-zero (< 1s),
+        at the cost of significantly higher fixed CPU RAM usage.
+        If insufficient CPU memory is available, performance may degrade due to memory paging.
+        For most users, "async" should suffice.
 
         "disabled" is the default mode.
         """
@@ -297,8 +304,6 @@ class CheckpointManager(Configurable):
         exclude_from_loading: list[str] = field(default_factory=list)
         """
         Exclude specific keys from being loaded from the checkpoint.
-        Provide a comma-separated list of keys to exclude, e.g. 'optimizer,lr_scheduler,dataloader'.
-        This will load the model only, excluding the specified keys.
         """
 
         enable_first_step_checkpoint: bool = False
