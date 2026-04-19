@@ -89,7 +89,7 @@ class DummyTrainerConfig:
         self.checkpoint = CheckpointManager.Config(
             enable=True,
             async_mode="disabled",
-            folder="",
+            folder="test_folder",
             interval=1,
             keep_latest_k=0,
             last_save_model_only=False,
@@ -118,7 +118,7 @@ class TestCheckpointManager(unittest.TestCase):
         ckpt_cfg = CheckpointManager.Config(
             enable=True,
             async_mode="DISABLED",
-            folder="",
+            folder=self.test_folder,
             interval=1,
             keep_latest_k=2,
             last_save_model_only=False,

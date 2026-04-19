@@ -16,7 +16,7 @@ import threading
 import time
 from concurrent.futures import Future
 from dataclasses import dataclass, field
-from typing import Any, cast, get_args, Literal
+from typing import Any, cast, Literal
 
 import torch
 import torch.distributed as dist
@@ -333,7 +333,9 @@ class CheckpointManager(Configurable):
             if self.keep_latest_k < 0:
                 raise ValueError("keep_latest_k cannot be negative.")
             if self.keep_latest_k == 1:
-                raise ValueError("keep_latest_k cannot be 1; maintain at least 2 replicas.")
+                raise ValueError(
+                    "keep_latest_k cannot be 1; maintain at least 2 replicas."
+                )
 
             # 2. Path Normalization & Warning
             if self.initial_load_path:
