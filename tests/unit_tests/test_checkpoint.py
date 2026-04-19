@@ -702,5 +702,90 @@ class TestCheckpointManager(unittest.TestCase):
         manager.load(step=1)
 
 
+class TestConfigPostInit(unittest.TestCase):
+    def test_valid_default_config(self):
+        """Verify that default values pass initialization."""
+        try:
+            CheckpointManager.Config()
+        except Exception as e:
+            self.fail(f"Default Config raised {type(e).__name__} unexpectedly!")
+
+    def test_sanity_and_range_checks(self):
+        """Test basic field validation like empty strings and negative numbers."""
+        # Folder cannot be empty
+        with self.assertRaisesRegex(ValueError, "folder.*cannot be empty"):
+            CheckpointManager.Config(folder="   ")
+
+        # Interval must be >= 1
+        with self.assertRaisesRegex(ValueError, "interval.*at least 1"):
+            CheckpointManager.Config(interval=0)
+
+        # keep_latest_k range checks
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            CheckpointManager.Config(keep_latest_k=-1)
+        with self.assertRaisesRegex(ValueError, "cannot be 1"):
+            CheckpointManager.Config(keep_latest_k=1)
+
+    def test_path_normalization(self):
+        """Test that paths are stripped and must be absolute."""
+        # Test leading/trailing whitespace stripping
+        cfg = CheckpointManager.Config(initial_load_path="  /absolute/path/step-100  ")
+        self.assertEqual(cfg.initial_load_path, "/absolute/path/step-100")
+
+        # Test relative path rejection
+        with self.assertRaisesRegex(ValueError, "must be absolute"):
+            CheckpointManager.Config(initial_load_path="relative/path/step-100")
+
+    def test_dependency_assertions(self):
+        """Test logic where one field requires another to be set."""
+        # HF load requires path and model_only
+        with self.assertRaisesRegex(
+            ValueError, "requires both initial_load_path and initial_load_model_only"
+        ):
+            CheckpointManager.Config(initial_load_in_hf=True, initial_load_path=None)
+
+        # HF quantized requires HF enabled
+        with self.assertRaisesRegex(ValueError, "requires initial_load_in_hf"):
+            CheckpointManager.Config(
+                initial_load_in_hf_quantized=True,
+                initial_load_in_hf=False,
+                initial_load_path="/path/step-1",
+            )
+
+        # HF last save requires model_only
+        with self.assertRaisesRegex(ValueError, "requires last_save_model_only=True"):
+            CheckpointManager.Config(last_save_in_hf=True, last_save_model_only=False)
+
+    def test_mode_normalization(self):
+        """Test that async_mode is case-normalized."""
+        cfg = CheckpointManager.Config(async_mode="ASYNC")
+        self.assertEqual(cfg.async_mode, "async")
+
+        with self.assertRaisesRegex(ValueError, "Invalid async_mode"):
+            CheckpointManager.Config(async_mode="invalid_mode")
+
+    @mock.patch("torchtitan.components.checkpoint.logger")
+    def test_warnings(self, mock_logger):
+        """Test that logical redundancies trigger warnings but don't crash."""
+
+        # 1. Path missing step suffix
+        CheckpointManager.Config(initial_load_path="/path/without/step")
+        mock_logger.warning.assert_any_call(
+            "initial_load_path '/path/without/step' missing step suffix (e.g. step-100)."
+        )
+
+        # 2. Redundant load_only vs first_step
+        CheckpointManager.Config(load_only=True, enable_first_step_checkpoint=True)
+        mock_logger.warning.assert_any_call(
+            "checkpoint.load_only is True; enable_first_step_checkpoint will be ignored."
+        )
+
+        # 3. model_only=True without a path
+        CheckpointManager.Config(initial_load_model_only=True, initial_load_path=None)
+        mock_logger.warning.assert_any_call(
+            "initial_load_model_only=True has no effect without an initial_load_path."
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
