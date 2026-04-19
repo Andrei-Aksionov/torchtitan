@@ -169,17 +169,17 @@ class CheckpointManager(Configurable):
     with the assumption that all lr_schedulers have the same state_dict.
 
     Args:
-        dataloader (DataLoader): The dataloader used to load the data.
+        config (Checkpoint): The config used to configure the checkpointing.
+        dataloader (BaseDataLoader): The dataloader used to load the data.
         model_parts (List[nn.Module]): List of model parts to be optimized.
         optimizers (OptimizersContainer): The optimizers used to optimize the model.
         lr_schedulers (LRSchedulersContainer): The lr schedulers used to optimize the model.
         states (Dict[str, Any]): The states that need to be saved, other than the
             previous 4 components.
-        config (Checkpoint): The config used to configure the checkpointing.
-        base_folder (str): The base folder to save the checkpoint. Will be concatenated
-            with config.folder
         sd_adapter (Optional[type[BaseStateDictAdapter]]): The adapter used to convert model state
             dicts between native format and other formats.
+        base_folder (str): The base folder to save the checkpoint. Will be concatenated
+            with config.folder
 
     """
 
