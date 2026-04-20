@@ -471,7 +471,6 @@ class CheckpointManager(Configurable):
             )
             self.purge_thread.start()
 
-        self.mp = None
         self.staging_future = None
         self.save_future = None
         if async_mode == AsyncMode.DISABLED:
@@ -492,10 +491,6 @@ class CheckpointManager(Configurable):
 
     def close(self):
         if hasattr(self, "enable") and self.enable:
-            if hasattr(self, "mp") and self.mp and self.mp.is_alive():
-                # pyrefly: ignore [missing-attribute]
-                self.mp_queue_send.put(Terminate())
-                self.mp.join()
             if (
                 hasattr(self, "purge_thread")
                 and self.purge_thread
