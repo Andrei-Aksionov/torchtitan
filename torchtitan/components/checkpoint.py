@@ -402,8 +402,16 @@ class CheckpointManager(Configurable):
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
+        # ------------------- Basic Configuration --------------------
+
         self.enable = config.enable
-        self.load_only = config.load_only
+        if not self.enable:
+            return
+
+        self.folder = os.path.join(base_folder, config.folder)
+        self.interval = config.interval
+
+        # --------------------- State Management ---------------------
 
         self.states = states
         self.states.update(
@@ -415,72 +423,56 @@ class CheckpointManager(Configurable):
             }
         )
 
-        async_mode = config.async_mode.lower()
-        self.enable_staging = (
-            self.enable and async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-        )
+        # ----------------- Loading & Saving Policy ------------------
 
-        if not self.enable:
-            return
-
-        self.staging = False
-        self.sending_to_checkpoint_mp = False
-        self.staging_id = None
-        self.cpu_offload_state_dict = None
-        self.stager = None
-        self.pg: dist.ProcessGroup | None = None
-
-        self.folder = os.path.join(base_folder, config.folder)
-
-        # Checkpoint policy related fields.
+        self.load_only = config.load_only
+        self.exclude_from_loading = config.exclude_from_loading
+        self.initial_load_path = config.initial_load_path
         self.initial_load_model_only = config.initial_load_model_only
         self.initial_load_in_hf = config.initial_load_in_hf
-        self.initial_load_path = config.initial_load_path
         self.initial_load_in_hf_quantized = config.initial_load_in_hf_quantized
+
+        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
         self.last_save_model_only = config.last_save_model_only
         self.last_save_in_hf = config.last_save_in_hf
-        if self.last_save_in_hf:
-            assert (
-                sd_adapter is not None
-            ), "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
-        self.sd_adapter = sd_adapter
         self.export_dtype = TORCH_DTYPE_MAP[config.export_dtype]
-        self.exclude_from_loading = config.exclude_from_loading
-        self.interval = config.interval
-        self.enable_first_step_checkpoint = config.enable_first_step_checkpoint
 
-        # Async checkpoint related fields.
-        async_mode = config.async_mode.lower()
-        if (
-            async_mode == AsyncMode.ASYNC
-            or async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-        ):
+        # Validation for HF conversion
+        self.sd_adapter = sd_adapter
+        if self.last_save_in_hf and self.sd_adapter is None:
+            raise ValueError(
+                "checkpoint.last_save_in_hf is True, but sd_adapter is not provided."
+            )
+
+        # ------------ Async & Distributed Infrastructure ------------
+
+        try:
+            self.async_mode = AsyncMode(config.async_mode)
+        except ValueError as e:
+            raise ValueError(
+                f"Unknown checkpoint async_mode {config.async_mode}"
+            ) from e
+
+        self.pg: dist.ProcessGroup | None = None
+        if self.async_mode in (AsyncMode.ASYNC, AsyncMode.ASYNC_WITH_PINNED_MEM):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
+
+        self.enable_staging = self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+        self.staging = False
+        self.stager: DefaultStager | None = None
+        self.staging_future: Future | None = None
+        self.save_future: Future | None = None
+
+        # ----------------- Retention Policy (Purge) -----------------
 
         self.keep_latest_k = config.keep_latest_k
         self.purge_thread: threading.Thread | None = None
         if self.keep_latest_k > 0:
-            if self.keep_latest_k == 1:
-                raise ValueError(
-                    "We need to maintain at least 2 checkpoint replicas, "
-                    "as the last one may be in the process of being saved."
-                )
             self.purge_queue = queue.Queue()
             self.purge_thread = threading.Thread(
                 target=purge_thread, args=(self.purge_queue,), daemon=True
             )
             self.purge_thread.start()
-
-        self.staging_future = None
-        self.save_future = None
-        if async_mode == AsyncMode.DISABLED:
-            self.async_mode = AsyncMode.DISABLED
-        elif async_mode == AsyncMode.ASYNC:
-            self.async_mode = AsyncMode.ASYNC
-        elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            self.async_mode = AsyncMode.ASYNC_WITH_PINNED_MEM
-        else:
-            raise ValueError(f"Unknown checkpoint async_mode {config.async_mode}")
 
         logger.info(
             f"Checkpointing active. Checkpoints will be loaded from and saved to {self.folder}"
@@ -677,9 +669,12 @@ class CheckpointManager(Configurable):
             self.staging = True
         elif self.async_mode == AsyncMode.ASYNC:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
-            self.save_future = self.dcp_save(
+            result = self.dcp_save(
                 states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
             )
+            assert isinstance(result, Future)
+            self.save_future = result
+
             GarbageCollection.collect("GC collection invoked by checkpointer.")
         else:
             self.dcp_save(

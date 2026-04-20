@@ -9,6 +9,7 @@ import shutil
 import tempfile
 import time
 import unittest
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest import mock
 
@@ -63,8 +64,12 @@ class FakeDataLoader(DataLoader):
 
 
 class DummyFuture:
-    def __init__(self):
-        self.result = mock.Mock()
+    def __new__(cls):
+        # Return a Mock that mimics Future instead of an instance of this class
+        # That allows isinstance(DummyFuture, Future) to pass
+        instance = mock.Mock(spec=Future)
+        instance.result = mock.Mock()
+        return instance
 
 
 class DummyAsyncResult(AsyncSaveResponse):
