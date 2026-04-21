@@ -68,7 +68,19 @@ class DummyFuture:
         # Return a Mock that mimics Future instead of an instance of this class
         # That allows isinstance(DummyFuture, Future) to pass
         instance = mock.Mock(spec=Future)
-        instance.result = mock.Mock()
+
+        # Add a custom attribute to the mock the done state
+        instance.finished = False
+
+        # When result() is called, it flips the finished flag
+        def side_effect_result(*args, **kwargs):
+            instance.finished = True
+            return None
+
+        instance.done.side_effect = lambda: instance.finished
+        instance.result.side_effect = side_effect_result
+        instance.result.return_value = None
+
         return instance
 
 
@@ -406,6 +418,7 @@ class TestCheckpointManager(unittest.TestCase):
         manager1.close()
         manager2.close()
 
+    @mock.patch("torchtitan.components.checkpoint.logger")
     @mock.patch("torch.distributed.get_rank", return_value=0)
     @mock.patch("torch.cuda.Stream")
     @mock.patch("torchtitan.components.checkpoint.DefaultStager")
@@ -413,20 +426,22 @@ class TestCheckpointManager(unittest.TestCase):
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_async_save_with_pinned_mem_sets_staging_flag(
+    def test_async_save_with_pinned_mem_assigns_staging_future(
         self,
         mock_async_save,
         mock_new_group,
         mock_default_stager,
         mock_cuda_stream,
         mock_rank,
+        mock_logger,
     ):
         """
-        Test that AsyncMode.ASYNC_WITH_PINNED_MEM correctly sets staging flag.
+        Test that AsyncMode.ASYNC_WITH_PINNED_MEM correctly assigns the staging future.
 
-        This test verifies the bug fix where self.staging was not being set to True
-        when using ASYNC_WITH_PINNED_MEM mode, which caused maybe_wait_for_staging()
-        to not wait properly for staging completion.
+        This test verifies that when using ASYNC_WITH_PINNED_MEM mode, the
+        staging_future is properly captured from the save response. This handle
+        is critical for ensuring that subsequent operations wait for the
+        GPU-to-CPU transfer to complete before proceeding.
         """
         # Configure async mode with pinned memory
         trainer_config = DummyTrainerConfig(dump_folder=self.trainer_config.dump_folder)
@@ -444,20 +459,23 @@ class TestCheckpointManager(unittest.TestCase):
             base_folder=self.trainer_config.dump_folder,
         )
 
-        # Initially staging should be False
-        self.assertFalse(manager.staging)
+        # Initially staging_future should be None
+        self.assertIsNone(manager.staging_future)
 
-        # After save, staging should be set to True
         manager.save(curr_step=1, last_step=False)
-        self.assertTrue(manager.staging)
-
-        # Verify that staging_future exists
+        # After save, staging_future shouldn't be None ...
         self.assertIsNotNone(manager.staging_future)
+        # ... and staging should be running
+        self.assertFalse(manager.staging_future.done())
 
-        # Verify that maybe_wait_for_staging actually waits when staging is True
+        # Verify that `maybe_wait_for_staging` actually waits for staging future to complete
         manager.maybe_wait_for_staging()
-        # After waiting, staging should be set back to False
-        self.assertFalse(manager.staging)
+        mock_logger.debug.assert_any_call(
+            "Staging future is not done yet; blocking for result."
+        )
+
+        # After waiting, the staging future should be None
+        self.assertIsNone(manager.staging_future)
 
         manager.close()
 

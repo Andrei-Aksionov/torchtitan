@@ -458,7 +458,6 @@ class CheckpointManager(Configurable):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
         self.enable_staging = self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
-        self.staging = False
         self.stager: DefaultStager | None = None
         self.staging_future: Future | None = None
         self.save_future: Future | None = None
@@ -666,7 +665,6 @@ class CheckpointManager(Configurable):
             assert isinstance(result, AsyncSaveResponse)
             self.save_future = result.upload_completion
             self.staging_future = result.staging_completion
-            self.staging = True
         elif self.async_mode == AsyncMode.ASYNC:
             GarbageCollection.collect("GC collection invoked by checkpointer.")
             result = self.dcp_save(
@@ -789,15 +787,27 @@ class CheckpointManager(Configurable):
         return True
 
     def maybe_wait_for_staging(self) -> None:
-        """Wait for the staging to finish if it is enabled.
-
-        This function will wait for staging to finish. The staging is only enabled
-        with ``async_checkpoint_with_pinned_memory``.
         """
-        if self.enable_staging and self.staging:
+        Wait for the staging process to complete if it is active.
+
+        In `ASYNC_WITH_PINNED_MEM` mode, the checkpoint data is first staged from
+        device (GPU) memory to pinned host (CPU) memory. This staging process is
+        asynchronous and designed to overlap with the subsequent training
+        computation (forward/backward passes).
+
+        This method ensures that the staging process has finished before the next
+        checkpoint cycle begins or before training completes, preventing memory
+        contention or race conditions in the pinned memory buffers.
+        """
+        if self.enable_staging:
+            # If a staging future exists, we must ensure it is consumed
             assert self.staging_future is not None
-            self.staging_future.result()
-            self.staging = False
+            if not self.staging_future.done():
+                logger.debug("Staging future is not done yet; blocking for result.")
+                self.staging_future.result()
+
+                # Clear the handle once confirmed finished
+                self.staging_future = None
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
