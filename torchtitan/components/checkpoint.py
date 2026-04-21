@@ -45,7 +45,6 @@ from torchtitan.protocols.state_dict_adapter import BaseStateDictAdapter
 from torchtitan.tools.logging import logger
 from torchtitan.tools.utils import GarbageCollection
 
-
 MODEL = "model"
 OPTIMIZER = "optimizer"
 LR_SCHEDULER = "lr_scheduler"
@@ -538,7 +537,7 @@ class CheckpointManager(Configurable):
         # ---------- 1. Format Adaptation (HF vs Standard) -----------
 
         if to_hf:
-            assert self.sd_adapter is not None, "sd_adapter required for to_hf=True"
+            assert self.sd_adapter is not None, "sd_adapter is required for to_hf=True"
             state_dict = self.sd_adapter.to_hf(state_dict)
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
 
@@ -610,37 +609,49 @@ class CheckpointManager(Configurable):
         from_hf: bool,
         from_quantized: bool,
     ) -> None:
-        """Load the checkpoint with dcp.
+        """
+        Load a Distributed Checkpoint (DCP) into the provided state dictionary.
+
+        This method handles both standard DCP sharded checkpoints and HuggingFace
+        safetensors. If loading from HF, it utilizes an adapter to map FQNs and
+        handle format-specific sharding logic.
+
         Args:
-            state_dict (dict): The state dict to load.
-            checkpoint_id (str): The checkpoint id to load.
-            from_hf (bool): Whether to load from HuggingFace checkpoint with
-                its own model definition and safetensors format.
+            state_dict (dict): The target dictionary to populate with checkpoint data.
+            checkpoint_id (str): Path or identifier for the source checkpoint.
+            from_hf (bool): If True, adapts the load process for HuggingFace model
+                definitions and safetensors format.
+            from_quantized (bool): Indicates if the source is in a quantized format
+                (e.g., 4-bit/8-bit), requiring the storage reader to handle
+                specialized data types and sharding structures.
+
+        Raises:
+            AssertionError: If `from_hf` is True but no `sd_adapter` is available.
         """
 
         if from_hf:
             assert (
                 self.sd_adapter is not None
-            ), "trying to load checkpoint in HF safetensors format, but sd_adapter is not provided."
+            ), "sd_adapter is required for initial_load_in_hf=True"
+
+            # Prepare HF-compatible dictionary and reader
             hf_state_dict = self.sd_adapter.to_hf(state_dict)
             hf_storage_reader = self.sd_adapter.get_hf_storage_reader(
                 checkpoint_id, from_quantized
             )
 
-            dcp.load(
-                hf_state_dict,
-                storage_reader=hf_storage_reader,
-            )
+            dcp.load(hf_state_dict, storage_reader=hf_storage_reader)
 
+            # Map the loaded HF tensors back to the internal model FQNs
             state_dict = self.sd_adapter.from_hf(hf_state_dict)
-            self.states[MODEL].load_state_dict(state_dict)
         else:
+            # Standard DCP load directly into the provided state_dict
             dcp.load(state_dict, checkpoint_id=checkpoint_id)
 
-            # TODO: Since we flatten the model states in state_dict, we need to
-            # manually call load_state_dict() for the model. Need to fix this.
-            if MODEL in self.states:
-                self.states[MODEL].load_state_dict(state_dict)
+        # TODO: Since we flatten the model states in state_dict, we need to
+        # manually call load_state_dict() for the model. Need to fix this.
+        if MODEL in self.states:
+            self.states[MODEL].load_state_dict(state_dict)
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
