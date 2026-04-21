@@ -677,7 +677,7 @@ class CheckpointManager(Configurable):
             return
 
         # Ensure the background thread/process of saving to disk is finished
-        self._async_wait()
+        self.maybe_wait_for_saving()
 
         begin_t = time.monotonic()
         checkpoint_phase = (
@@ -886,6 +886,33 @@ class CheckpointManager(Configurable):
                 # Clear the handle once confirmed finished
                 self.staging_future = None
 
+    def maybe_wait_for_saving(self) -> None:
+        """
+        Wait for any outstanding checkpoint saving operations to complete.
+
+        This is a blocking call that ensures all checkpoint data has been fully
+        saved to storage. Upon completion, the tracking future is cleared
+        to signify that no background save operations are currently active.
+
+        Raises:
+            RuntimeError: If a save future is detected while asynchronous mode is disabled.
+        """
+
+        if self.save_future is None:
+            return
+
+        if self.async_mode == AsyncMode.DISABLED:
+            raise RuntimeError(
+                "self.save_future is not None, but self.async_mode is disabled."
+            )
+
+        # Block execution until the disk I/O (upload) is finished
+        self.save_future.result()
+
+        if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
+            # The stager manages the future's lifecycle.
+            self.save_future = None
+
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
 
@@ -1008,19 +1035,6 @@ class CheckpointManager(Configurable):
             return True
 
         return False
-
-    def _async_wait(self) -> None:
-        if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            if self.save_future is not None:
-                self.save_future.result()
-        elif self.async_mode == AsyncMode.ASYNC:
-            if self.save_future is not None:
-                self.save_future.result()
-                self.save_future = None
-        elif self.save_future is not None:
-            raise RuntimeError(
-                "self.save_future is not None, but self.async_mode is not enabled."
-            )
 
     def _should_purge(self) -> bool:
         """Whether this rank should purge stale checkpoints.

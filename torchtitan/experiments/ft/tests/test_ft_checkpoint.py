@@ -104,7 +104,7 @@ class TestFTCheckpointManager(unittest.TestCase):
     @mock.patch(
         "torchtitan.components.checkpoint.dcp.async_save", side_effect=fake_async_save
     )
-    def test_ft_async_save_calls_async_wait(
+    def test_ft_async_save_calls_maybe_wait_for_saving(
         self,
         mock_async_save,
         mock_new_group,
