@@ -94,7 +94,7 @@ class DummyAsyncResult(AsyncSaveResponse):
 
 def fake_async_save(*args, **kwargs):
     # Check if this is async_with_pinned_mem mode by looking for async_stager parameter
-    if "async_stager" in kwargs:
+    if kwargs.get("async_stager"):
         return DummyAsyncResult()
     else:
         return DummyFuture()

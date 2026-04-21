@@ -506,73 +506,89 @@ class CheckpointManager(Configurable):
         enable_garbage_collection: bool = False,
         to_hf: bool = False,
     ) -> Future | AsyncSaveResponse | None:
-        """Save the checkpoint with dcp.
+        """
+        Execute the Distributed Checkpoint (DCP) saving process.
+
+        This method orchestrates the state_dict transformation (e.g., to HuggingFace format),
+        selects the appropriate storage writer, and dispatches the save
+        operation based on the requested synchronicity mode.
+
         Args:
             state_dict (dict): The state dict to save.
-            checkpoint_id (str): The checkpoint id to save.
-            async_mode (AsyncMode): Whether the checkpoint is async.
-            enable_garbage_collection (bool): Whether to enable garbage collection after save.
-            to_hf (bool): Whether to save in HF model definition and safetensors format.
+            checkpoint_id (str): A unique identifier (usually a path) for the checkpoint.
+            async_mode (AsyncMode): The execution strategy (DISABLED, ASYNC, or ASYNC_WITH_PINNED_MEM).
+            enable_garbage_collection (bool): If True, triggers a manual GC collect after save.
+            to_hf (bool): If True, uses a HuggingFaceStorageWriter and adapts the state_dict
+                to be compatible with safetensors and HF model definitions.
 
         Returns:
-            Future: The future object if the checkpoint is async, otherwise None.
+            - None: If saved synchronously (AsyncMode.DISABLED).
+            - Future: If AsyncMode.ASYNC is used (tracks disk I/O).
+            - AsyncSaveResponse: If AsyncMode.ASYNC_WITH_PINNED_MEM is used
+              (tracks both staging and disk I/O).
         """
 
         ret: Future | AsyncSaveResponse | None = None
 
         storage_writer: HuggingFaceStorageWriter | None = None
-        checkpoint_save_id: str | None = None
         fqn_to_index_mapping: dict[Any, int] | None = None
+
+        checkpoint_save_id = checkpoint_id
+
+        # ---------- 1. Format Adaptation (HF vs Standard) -----------
+
         if to_hf:
-            assert (
-                self.sd_adapter is not None
-            ), "trying to save checkpoint in HF safetensors format, but sd_adapter is not provided."
+            assert self.sd_adapter is not None, "sd_adapter required for to_hf=True"
             state_dict = self.sd_adapter.to_hf(state_dict)
-
             fqn_to_index_mapping = self.sd_adapter.fqn_to_index_mapping
-            if fqn_to_index_mapping:
-                storage_writer = HuggingFaceStorageWriter(
-                    path=os.path.join(checkpoint_id, "sharded"),
-                    save_distributed=True,
-                    fqn_to_index_mapping=fqn_to_index_mapping,
-                    enable_consolidation=False,
-                )
-            else:
-                # the reason for only enabling consolidation if there is
-                # no mapping is because no mapping implies that we save all fqns
-                # to one file. This means we only need one rank to consolidate.
-                # Otherwise we should use consolidate_safetensors_files_on_every_rank
-                storage_writer = HuggingFaceStorageWriter(
-                    path=checkpoint_id,
-                    save_distributed=True,
-                    enable_consolidation=True,
-                )
 
-        else:
-            checkpoint_save_id = checkpoint_id
+            # Storage Writer Configuration
+            # If sharded, we save to a subdir then consolidate
+            save_path = (
+                os.path.join(checkpoint_id, "sharded")
+                if fqn_to_index_mapping
+                else checkpoint_id
+            )
+            storage_writer = HuggingFaceStorageWriter(
+                path=save_path,
+                save_distributed=True,
+                fqn_to_index_mapping=fqn_to_index_mapping,
+                enable_consolidation=not fqn_to_index_mapping,
+            )
+            # NOTE: If `fqn_to_index_mapping` is absent, all FQNs are saved into a single unified file.
+            # In this case, the StorageWriter can handle consolidation internally on a single rank.
+            # However, when a mapping exists, the weights are distributed across multiple files (sharded).
+            # The internal consolidation is disabled here and instead `consolidate_safetensors_files_on_every_rank`
+            # is used later to manage the multi-file merging process.
 
-        if async_mode == AsyncMode.ASYNC:
-            ret = dcp.async_save(
-                state_dict,
-                storage_writer=storage_writer,
-                checkpoint_id=checkpoint_save_id,
-                process_group=self.pg,
-            )
-        elif async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            ret = dcp.async_save(
-                state_dict,
-                storage_writer=storage_writer,
-                checkpoint_id=checkpoint_save_id,
-                process_group=self.pg,
-                async_checkpointer_type=AsyncCheckpointerType.PROCESS,
-                async_stager=self.stager,
-            )
-        else:
+            checkpoint_save_id = None  # storage_writer handles the path
+
+        # ------------------ 2. Execution Dispatch -------------------
+
+        if async_mode == AsyncMode.DISABLED:
             ret = dcp.save(
                 state_dict,
                 storage_writer=storage_writer,
                 checkpoint_id=checkpoint_save_id,
             )
+        else:
+            is_pinned = async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
+            async_checkpointer_type = (
+                AsyncCheckpointerType.PROCESS
+                if is_pinned
+                else AsyncCheckpointerType.THREAD
+            )
+            async_stager = self.stager if is_pinned else None
+            ret = dcp.async_save(
+                state_dict,
+                storage_writer=storage_writer,
+                checkpoint_id=checkpoint_save_id,
+                process_group=self.pg,
+                async_checkpointer_type=async_checkpointer_type,
+                async_stager=async_stager,
+            )
+
+        # ------- 3. Post-Processing (Consolidation & Cleanup) -------
 
         if to_hf and fqn_to_index_mapping:
             consolidate_safetensors_files_on_every_rank(
