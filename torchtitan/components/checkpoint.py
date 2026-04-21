@@ -655,68 +655,100 @@ class CheckpointManager(Configurable):
 
     @torch.no_grad()
     def save(self, curr_step: int, last_step: bool = False) -> None:
-        """Save the checkpoint for the current step.
+        """
+        Save the checkpoint for the current training step.
 
-        This function will save the checkpoint for the current step. If ``last_step`` is
-        true, it will save the checkpoint even if the interval has not been reached.
-        This only happens when train_state.step == trainer_config.training.steps, or
-        for initial seed checkpoint.
+        This function manages the checkpointing lifecycle for the current step.
+        A save is performed if any of the following conditions are met:
+        1. It is the initial seed checkpoint (step 0).
+        2. The current step matches the configured saving interval.
+        3. `last_step` is True, which forces a save regardless of the interval.
+           This typically happens when the training reaches its final step.
 
         Args:
-            curr_step (int): The current step.
-            last_step (bool, optional): Whether this is the last step of training.
+            curr_step (int): The current training step.
+            last_step (bool, optional): Whether this is the final step of training.
 
         Returns:
             None
         """
+
         if not self._should_save(curr_step, last_step):
             return
 
-        begin = time.monotonic()
-        logger.info("Saving the checkpoint (or staging if async is enabled).")
-        checkpoint_id = self._create_checkpoint_id(curr_step)
+        # Ensure the background thread/process of saving to disk is finished
         self._async_wait()
-        # This GC is called for async checkpoint as it is useless to do
-        # GC right after async_save -- the CPU memory is not able to be
-        # freed until _async_wait()
+
+        begin_t = time.monotonic()
+        checkpoint_phase = (
+            "saving" if self.async_mode == AsyncMode.DISABLED else "staging"
+        )
+        logger.info(f"{checkpoint_phase.capitalize()} the checkpoint.")
+
+        checkpoint_id = self._create_checkpoint_id(curr_step)
+
+        # ------------------ 1. Specialized Last Step ------------------
+
         if last_step:
             self._save_last_step(curr_step)
+            logger.info(
+                f"Last step checkpoint completed in {time.monotonic() - begin_t:.2f}s"
+            )
             return
 
+        # --------- 2. State Preparation & Memory Management  ----------
+
         states = self._flattened_model_states_sd()
+
+        if self.async_mode != AsyncMode.DISABLED:
+            # Reclaim memory from the previous step's finished async operations
+            # before allocating new buffers for the current step.
+            GarbageCollection.collect("Preparing memory for async checkpoint staging.")
+
+        # ------------------- 3. Execution Dispatch --------------------
+
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
             if self.stager is None:
                 self.stager = DefaultStager(StagingOptions(True, True, True, True))
+
             result = self.dcp_save(
-                states,
-                checkpoint_id=checkpoint_id,
-                async_mode=self.async_mode,
+                states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
             )
             assert isinstance(result, AsyncSaveResponse)
             self.save_future = result.upload_completion
             self.staging_future = result.staging_completion
+
+            # NOTE: For ASYNC_WITH_PINNED_MEM, we skip GC here because the staging process
+            # (copying from GPU to CPU) is still ongoing. The pinned CPU buffers
+            # are actively in use and cannot be reclaimed until staging finishes.
+
         elif self.async_mode == AsyncMode.ASYNC:
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
             result = self.dcp_save(
                 states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
             )
             assert isinstance(result, Future)
             self.save_future = result
 
+            # NOTE: For standard ASYNC, the GPU-to-CPU copy to the background thread
+            # is already complete. GC now can immediately free the
+            # original tensor references in the main thread.
             GarbageCollection.collect("GC collection invoked by checkpointer.")
+
         else:
+            # Synchronous save
             self.dcp_save(
                 states,
                 checkpoint_id=checkpoint_id,
                 async_mode=AsyncMode.DISABLED,
                 enable_garbage_collection=True,
             )
+
+        # ----------------- 4. Cleanup & Logging ------------------
+
         self._purge_stale_checkpoints()
 
         logger.info(
-            "Finished saving the checkpoint (or staging if async is enabled) "
-            f"in {time.monotonic() - begin:.2f} seconds."
+            f"Finished {checkpoint_phase} the checkpoint in {time.monotonic() - begin_t:.2f} seconds."
         )
 
     @torch.no_grad()
