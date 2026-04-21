@@ -755,64 +755,71 @@ class CheckpointManager(Configurable):
     def load(self, step: int = -1) -> bool:
         """Load the checkpoint for the given step.
 
-        This function will load the checkpoint for the given step. If ``step`` is -1, it
-        will load the latest checkpoint. If the checkpoint does not exist, it will return
-        False and load nothing.
+        This function orchestrates the states loading process.
+        If the local checkpoint folder does not yet exist, it attempts an initial load from
+        a specified path (in either native or HF format) or performs loading
+        using provided HF assets path from the state dict adapter.
+        Otherwise, it retrieves the checkpoint corresponding to the specified step,
+        defaulting to the latest available if the `step` is -1.
 
         Args:
-            step (int, optional): The step to load the checkpoint for. Defaults to -1.
+            step (int, optional): The training step to restore. Defaults to -1 (latest available).
 
         Returns:
-            bool: Whether the checkpoint was loaded successfully.
+            bool: Whether the checkpoint was successfully located and loaded.
         """
+
         if not self.enable:
             return False
+
+        # -------------------- 1. Checkpoint Path Resolution ---------------------
 
         model_only = False
         from_hf = False
         from_quantized = False
+
         if not os.path.exists(self.folder):
+            # Case A: Local folder doesn't exist - attempt initial/external load
+            # (e.g. "I am starting fresh but using someone else's (or my own previous) work")
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
-            if from_hf:
-                assert (
-                    model_only
-                ), "Only model can be loaded when loading from HF's safetensors checkpoint."
 
+            # Safety checks for HF/Quantization
+            if from_hf:
+                assert model_only, "Only model can be loaded from HF safetensors."
             if from_quantized:
-                assert (
-                    from_hf
-                ), "Quantized checkpoint can only be loaded from HuggingFace format."
+                assert from_hf, "Quantized checkpoints must be in HF format."
 
             if self.initial_load_path:
                 checkpoint_id = self.initial_load_path
                 if not os.path.isdir(checkpoint_id):
-                    raise ValueError(
-                        "checkpoint.initial_load_path is specified but the path is not valid."
-                    )
+                    raise ValueError(f"initial_load_path is invalid: {checkpoint_id}")
                 if from_hf:
                     logger.info(
-                        f"loading from HF safetensors from --checkpoint.initial_load_path: {self.initial_load_path}"
+                        f"Loading HF safetensors from checkpoint.initial_load_path: {checkpoint_id}"
                     )
+
             elif from_hf:
                 assert (
-                    self.sd_adapter is not None
-                    and self.sd_adapter.hf_assets_path is not None
-                ), "from_hf is True but sd_adapter or hf_assets_path is not provided."
-                hf_assets_path = self.sd_adapter.hf_assets_path
-                checkpoint_id = hf_assets_path
+                    self.sd_adapter and self.sd_adapter.hf_assets_path
+                ), "from_hf=True requires sd_adapter and hf_assets_path."
+                checkpoint_id = self.sd_adapter.hf_assets_path
                 if not os.path.isdir(checkpoint_id):
                     raise ValueError(
-                        "model.hf_assets_path is being used to load HF weights but the path is not valid. \
-                        Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
+                        "model.hf_assets_path is being used to load HF weights but the path is not valid. "
+                        "Either make sure hf_assets_path is correct or provide a valid checkpoint.initial_load_path"
                     )
                 logger.info(
-                    f"loading HF safetensors from --model.hf_assets_path: {hf_assets_path}"
+                    f"Loading HF safetensors from checkpoint.hf_assets_path: {checkpoint_id}"
                 )
+
             else:
-                return False
+                return False  # No local folder and no initial load path defined
+
         else:
+            # Case B: Local folder exists - prioritize local training checkpoints
+            # (e.g. "I am continuing my own work")
             if self.initial_load_path:
                 logger.warning(
                     "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
@@ -823,19 +830,24 @@ class CheckpointManager(Configurable):
                     "checkpoint.initial_load_in_hf is True but the checkpoint.folder exists. "
                     "Checkpointer will not load from HF safetensors"
                 )
+
             step = self._find_load_step() if step == -1 else step
             if step == -1:
                 return False
+
             model_only = step == 0
             checkpoint_id = self._create_checkpoint_id(step)
 
             if not os.path.isdir(checkpoint_id):
                 raise FileNotFoundError(
-                    f"--checkpoint.load_step={step} but checkpoint {checkpoint_id} is not found."
+                    f"Checkpoint step {step} not found at {checkpoint_id}"
                 )
 
+        # ------------------------ 2. Execution & Loading ------------------------
+
         logger.info(f"Loading the checkpoint from {checkpoint_id}.")
-        begin = time.monotonic()
+        begin_t = time.monotonic()
+
         states = self._states_to_load(model_only)
         self.dcp_load(
             states,
@@ -843,10 +855,12 @@ class CheckpointManager(Configurable):
             from_hf=from_hf,
             from_quantized=from_quantized,
         )
+
         GarbageCollection.collect("GC collection for checkpoint loading.")
         logger.info(
-            f"Finished loading the checkpoint in {time.monotonic() - begin:.2f} seconds."
+            f"Finished loading the checkpoint in {time.monotonic() - begin_t:.2f} seconds."
         )
+
         return True
 
     def maybe_wait_for_staging(self) -> None:
