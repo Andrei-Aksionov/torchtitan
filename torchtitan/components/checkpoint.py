@@ -960,15 +960,28 @@ class CheckpointManager(Configurable):
         return max(valid_steps) if valid_steps else -1
 
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
-        folder = folder if folder else self.folder
+        """Generate the standardized filesystem path for a checkpoint (e.g., 'checkpoints/step-100')."""
+        folder = folder or self.folder
         return os.path.join(folder, f"step-{step}")
 
     def _flattened_model_states_sd(
         self, state_dict: dict[str, Any] | None = None
     ) -> dict[str, Any]:
-        """Flatten the model states into a single dictionary.
+        """
+        Extract and flatten model parameters into a single state dictionary.
 
-        Note that other states, such as optimizer states, are not flattened.
+        This method merges the internal state of the model object into the top-level
+        dictionary while keeping auxiliary states (such as optimizers or lr_schedulers)
+        unflattened. This ensures a consistent format for the Distributed Checkpoint
+        (DCP) writer.
+
+        Args:
+            state_dict (dict[str, Any], optional): A custom dictionary to flatten.
+                Defaults to None (uses the instance's internal states).
+
+        Returns:
+            dict[str, Any]: A unified dictionary containing both flattened model
+                parameters and top-level auxiliary states.
         """
         states = state_dict if state_dict is not None else self.states
         sd = {k: v for k, v in states.items() if k != MODEL}
@@ -977,16 +990,21 @@ class CheckpointManager(Configurable):
         return sd
 
     def _states_to_load(self, model_only: bool) -> dict[str, Any]:
-        """Determines which states to load for the given step.
+        """
+        Determine which state objects should be restored during loading.
 
-        This API is used to determine which states to load based on the
-        configurations.
+        This method filters the checkpointer's state dictionary based on the
+        loading context. It supports partial restoration for specific steps
+        (e.g., loading only model weights for step 0) and respects explicit
+        exclusion rules for auxiliary states.
 
         Args:
-            model_only (bool): Whether to load the model only.
+            model_only (bool): If True, returns only the model's parameters,
+                bypassing optimizers and other training metadata.
 
         Returns:
-            Dict[str, Any]: The states to load for the given step.
+            dict[str, Any]: A prepared dictionary of states to be passed to
+                the loader.
         """
         # For the first step, we will only load the model.
         if model_only:
@@ -1000,15 +1018,30 @@ class CheckpointManager(Configurable):
             k: v for k, v in self.states.items() if k not in self.exclude_from_loading
         }
 
-        states_to_load = self._flattened_model_states_sd(states_to_load)
-
-        return states_to_load
+        return self._flattened_model_states_sd(states_to_load)
 
     def _save_last_step(self, curr_step: int) -> None:
-        # We only consider saving model only at the end of the training. So this
-        # won't affect preemption and training resume. We also only allow dtype
-        # conversion when we are checkpointing model only and the current dtype
-        # is not the same as the export dtype at the end of the training.
+        """
+        Execute the final checkpoint save at the completion of training.
+
+        This method handles the specific requirements for the final training
+        artifact. It allows for saving model weights exclusively (stripping
+        optimizer states), performing data type conversion for export, and
+        optionally formatting the output for HuggingFace compatibility.
+
+        Args:
+            curr_step (int): The final training step index.
+        """
+
+        # If `last_save_model_only` is False, we save the full training state
+        # without dtype conversion to ensure training can be resumed safely.
+        # Otherwise, we assume training is fully complete and save only the model
+        # with dtype conversion if the current dtype isn't equal to the export dtype.
+
+        if self.last_save_in_hf:
+            assert (
+                self.last_save_model_only
+            ), "Only model can be saved when saving in HF safetensors format."
 
         if self.last_save_model_only:
             states = self.states[MODEL].state_dict()
@@ -1020,13 +1053,9 @@ class CheckpointManager(Configurable):
                 f"at last step, step {curr_step}."
             )
         else:
+            # Full state save: keeping master weights as-is to ensure resume ability remains numerically sound.
             logger.info(f"Saving a full checkpoint at last step, step {curr_step}.")
             states = self._flattened_model_states_sd()
-
-        if self.last_save_in_hf:
-            assert (
-                self.last_save_model_only
-            ), "Only model can be saved when saving in HF safetensors format."
 
         self.dcp_save(
             states,
@@ -1037,6 +1066,8 @@ class CheckpointManager(Configurable):
         )
 
     def _should_save(self, curr_step: int, last_step: bool = False) -> bool:
+        """Determine whether a checkpoint should be saved based on the current step, interval, and training status."""
+
         if not self.enable or self.load_only:
             return False
 
@@ -1065,6 +1096,7 @@ class CheckpointManager(Configurable):
         )
 
     def _purge_stale_checkpoints(self):
+        """Remove older checkpoint directories from storage to maintain only the most recent 'k' copies."""
         if self._should_purge():
             discovered_checkpoints = []
             for filename in os.listdir(self.folder):
