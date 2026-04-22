@@ -456,7 +456,6 @@ class CheckpointManager(Configurable):
         if self.async_mode in (AsyncMode.ASYNC, AsyncMode.ASYNC_WITH_PINNED_MEM):
             self.pg = cast(dist.ProcessGroup, dist.new_group(backend="gloo"))
 
-        self.enable_staging = self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM
         self.stager: DefaultStager | None = None
         self.staging_future: Future | None = None
         self.save_future: Future | None = None
@@ -875,27 +874,35 @@ class CheckpointManager(Configurable):
         This method ensures that the staging process has finished before the next
         checkpoint cycle begins or before training completes, preventing memory
         contention or race conditions in the pinned memory buffers.
-        """
-        if self.enable_staging:
-            # If a staging future exists, we must ensure it is consumed
-            assert self.staging_future is not None
-            if not self.staging_future.done():
-                logger.debug("Staging future is not done yet; blocking for result.")
-                self.staging_future.result()
 
-                # Clear the handle once confirmed finished
-                self.staging_future = None
+        Raises:
+            RuntimeError: If a staging future is detected while asynchronous mode
+                isn't ASYNC_WITH_PINNED_MEM.
+        """
+
+        if self.staging_future is None:
+            return
+
+        if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
+            raise RuntimeError(
+                "self.staging_future is not None, but self.async_mode isn't ASYNC_WITH_PINNED_MEM."
+            )
+
+        if not self.staging_future.done():
+            logger.debug("Staging future is not done yet; blocking for result.")
+            self.staging_future.result()
+            self.staging_future = None
 
     def maybe_wait_for_saving(self) -> None:
         """
-        Wait for any outstanding checkpoint saving operations to complete.
+        Wait for any async background checkpoint saving operation to complete.
 
         This is a blocking call that ensures all checkpoint data has been fully
         saved to storage. Upon completion, the tracking future is cleared
         to signify that no background save operations are currently active.
 
         Raises:
-            RuntimeError: If a save future is detected while asynchronous mode is disabled.
+            RuntimeError: If a save future is detected while asynchronous mode is DISABLED.
         """
 
         if self.save_future is None:
@@ -903,15 +910,13 @@ class CheckpointManager(Configurable):
 
         if self.async_mode == AsyncMode.DISABLED:
             raise RuntimeError(
-                "self.save_future is not None, but self.async_mode is disabled."
+                "self.save_future is not None, but self.async_mode is DISABLED."
             )
 
-        # Block execution until the disk I/O (upload) is finished
-        self.save_future.result()
-
-        if self.async_mode != AsyncMode.ASYNC_WITH_PINNED_MEM:
-            # The stager manages the future's lifecycle.
-            self.save_future = None
+        if not self.save_future.done():
+            logger.debug("Saving future is not done yet; blocking for result.")
+            self.save_future.result()
+            self.staging_future = None
 
     def _find_load_step(self, folder: str = "") -> int:
         """Find the step to load the checkpoint for.
