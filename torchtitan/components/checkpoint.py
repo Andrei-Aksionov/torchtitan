@@ -919,35 +919,45 @@ class CheckpointManager(Configurable):
             self.staging_future = None
 
     def _find_load_step(self, folder: str = "") -> int:
-        """Find the step to load the checkpoint for.
+        """
+        Identify the highest available checkpoint step in the specified directory.
+
+        This method scans the target folder for subdirectories matching the
+        'step-N' pattern. A folder is only considered a valid checkpoint if
+        it contains either a DCP metadata file or a HuggingFace safetensors
+        index.
 
         Args:
-            folder (str, optional): The folder to find the checkpoint for. If ``folder``
-            is "", then ``self.folder`` will be used.
+            folder (str, optional): The directory to scan.
 
         Returns:
-            int: The step to load the checkpoint for.
+            int: The maximum step number found among valid checkpoints,
+                or -1 if no valid checkpoints are detected.
         """
-        folder = folder if folder else self.folder
-        pattern = r"step-(\d+)"
-        step_counts = []
 
+        folder = folder or self.folder
         if not os.path.isdir(folder):
             return -1
 
+        pattern = r"step-(\d+)"
+        valid_steps = []
+
         for filename in os.listdir(folder):
             match = re.search(pattern, filename)
-            dcp_metadata_probe = os.path.join(folder, filename, ".metadata")
-            safetensors_metadata_probe = os.path.join(
-                folder, filename, "model.safetensors.index.json"
+            if not match:
+                continue
+
+            # A checkpoint is valid only if it contains core metadata
+            checkpoint_path = os.path.join(folder, filename)
+            is_dcp = os.path.isfile(os.path.join(checkpoint_path, ".metadata"))
+            is_hf = os.path.isfile(
+                os.path.join(checkpoint_path, "model.safetensors.index.json")
             )
-            if match and os.path.isfile(dcp_metadata_probe):
-                step_counts.append(int(match.group(1)))
-            elif match and os.path.isfile(safetensors_metadata_probe):
-                step_counts.append(int(match.group(1)))
-        if not step_counts:
-            return -1
-        return max(step_counts)
+
+            if is_dcp or is_hf:
+                valid_steps.append(int(match.group(1)))
+
+        return max(valid_steps) if valid_steps else -1
 
     def _create_checkpoint_id(self, step: int, folder: str = "") -> str:
         folder = folder if folder else self.folder
