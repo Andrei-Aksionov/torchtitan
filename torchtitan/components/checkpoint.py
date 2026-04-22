@@ -711,27 +711,34 @@ class CheckpointManager(Configurable):
                 self.stager = DefaultStager(StagingOptions(True, True, True, True))
 
             result = self.dcp_save(
-                states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
+                states,
+                checkpoint_id=checkpoint_id,
+                async_mode=self.async_mode,
+                enable_garbage_collection=False,  # Skipping GC
             )
-            assert isinstance(result, AsyncSaveResponse)
-            self.save_future = result.upload_completion
-            self.staging_future = result.staging_completion
 
             # NOTE: For ASYNC_WITH_PINNED_MEM, we skip GC here because the staging process
             # (copying from GPU to CPU) is still ongoing. The pinned CPU buffers
             # are actively in use and cannot be reclaimed until staging finishes.
 
+            assert isinstance(result, AsyncSaveResponse)
+            self.save_future = result.upload_completion
+            self.staging_future = result.staging_completion
+
         elif self.async_mode == AsyncMode.ASYNC:
             result = self.dcp_save(
-                states, checkpoint_id=checkpoint_id, async_mode=self.async_mode
+                states,
+                checkpoint_id=checkpoint_id,
+                async_mode=self.async_mode,
+                enable_garbage_collection=True,
             )
-            assert isinstance(result, Future)
-            self.save_future = result
 
             # NOTE: For standard ASYNC, the GPU-to-CPU copy to the background thread
             # is already complete. GC now can immediately free the
             # original tensor references in the main thread.
-            GarbageCollection.collect("GC collection invoked by checkpointer.")
+
+            assert isinstance(result, Future)
+            self.save_future = result
 
         else:
             # Synchronous save
@@ -779,7 +786,7 @@ class CheckpointManager(Configurable):
 
         if not os.path.exists(self.folder):
             # Case A: Local folder doesn't exist - attempt initial/external load
-            # (e.g. "I am starting fresh but using someone else's (or my own previous) work")
+            # (i.e. "I am starting fresh but using someone else's (or my own previous) work")
             model_only = self.initial_load_model_only
             from_hf = self.initial_load_in_hf
             from_quantized = self.initial_load_in_hf_quantized
@@ -817,8 +824,8 @@ class CheckpointManager(Configurable):
                 return False  # No local folder and no initial load path defined
 
         else:
-            # Case B: Local folder exists - prioritize local training checkpoints
-            # (e.g. "I am continuing my own work")
+            # Case B: Local folder exists - load local training checkpoints
+            # (i.e. "I am continuing my own work")
             if self.initial_load_path:
                 logger.warning(
                     "checkpoint.initial_load_path is provided but the checkpoint.folder exists. "
@@ -862,6 +869,7 @@ class CheckpointManager(Configurable):
 
         return True
 
+    # TODO (andrei aksionau): order methods
     def maybe_wait_for_staging(self) -> None:
         """
         Wait for the staging process to complete if it is active.
