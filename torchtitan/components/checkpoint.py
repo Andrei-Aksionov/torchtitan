@@ -401,7 +401,6 @@ class CheckpointManager(Configurable):
         sd_adapter: BaseStateDictAdapter | None,
         base_folder: str = "",
     ) -> None:
-        # ------------------- Basic Configuration --------------------
 
         self.enable = config.enable
         if not self.enable:
@@ -409,8 +408,6 @@ class CheckpointManager(Configurable):
 
         self.folder = os.path.join(base_folder, config.folder)
         self.interval = config.interval
-
-        # --------------------- State Management ---------------------
 
         self.states = states
         self.states.update(
@@ -708,7 +705,14 @@ class CheckpointManager(Configurable):
 
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             if self.stager is None:
-                self.stager = DefaultStager(StagingOptions(True, True, True, True))
+                self.stager = DefaultStager(
+                    StagingOptions(
+                        use_pinned_memory=True,
+                        use_shared_memory=True,
+                        use_async_staging=True,
+                        use_non_blocking_copy=True,
+                    )
+                )
 
             result = self.dcp_save(
                 states,
@@ -869,7 +873,7 @@ class CheckpointManager(Configurable):
 
         return True
 
-    # TODO (andrei aksionau): order methods
+    # TODO (andrei aksionau): better order methods
     def maybe_wait_for_staging(self) -> None:
         """
         Wait for the staging process to complete if it is active.
@@ -1018,6 +1022,8 @@ class CheckpointManager(Configurable):
         if model_only:
             return self.states[MODEL].state_dict()
 
+        # TODO (andrei aksionau): nothing prevents from excluding loading model.
+        #   Is this desirable?
         for exclude_key in self.exclude_from_loading:
             if exclude_key not in self.states:
                 raise ValueError(f"{exclude_key} not found in state_dict.")
@@ -1054,6 +1060,8 @@ class CheckpointManager(Configurable):
         if self.last_save_model_only:
             states = self.states[MODEL].state_dict()
 
+            # TODO (andrei aksionau): ask maintainers what if the model not in fp32
+            #   but a user wants to export to fp32
             if self.export_dtype != torch.float32:
                 states = {k: v.to(self.export_dtype) for k, v in states.items()}
             logger.info(
